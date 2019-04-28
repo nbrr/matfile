@@ -3,7 +3,7 @@ use nom::{
     alt, apply, be_f32, be_f64, be_i16, be_i32, be_i64, be_i8, be_u16, be_u32, be_u64, be_u8, char,
     complete, cond, count, count_fixed, do_parse, error_position, i32, le_f32, le_f64, le_i16,
     le_i32, le_i64, le_i8, le_u16, le_u32, le_u64, le_u8, length_value, many0, map, map_res, not,
-    opt, pair, peek, switch, tag, take, u16, u32, value, IResult,
+    opt, pair, peek, switch, tag, take, take_till, u16, u32, value, IResult,
 };
 use num_traits::FromPrimitive;
 use std::io::Read;
@@ -65,13 +65,17 @@ impl NumericData {
 
 #[derive(Clone, Debug)]
 pub enum DataElement {
-    NumericMatrix(
+    // Cell Matrix,
+    StructureMatrix(
         ArrayFlags,
         Dimensions,
         String,
-        NumericData,
-        Option<NumericData>,
+        FieldNameLength,
+        Vec<FieldName>,
+        Fields,
     ),
+    // Object Matrix,
+    // CharacterMatrix,
     SparseMatrix(
         ArrayFlags,
         Dimensions,
@@ -81,10 +85,13 @@ pub enum DataElement {
         NumericData,
         Option<NumericData>,
     ),
-    // CharacterMatrix,
-    // Cell Matrix,
-    // Structure Matrix,
-    // Object Matrix,
+    NumericMatrix(
+        ArrayFlags,
+        Dimensions,
+        String,
+        NumericData,
+        Option<NumericData>,
+    ),
     Unsupported,
 }
 
@@ -374,7 +381,7 @@ fn parse_matrix_data_element(i: &[u8], endianness: nom::Endianness) -> IResult<&
             >> data_element:
                 switch!(value!(flags.class),
                      ArrayType::Cell => apply!(parse_unsupported_data_element, endianness)
-                    | ArrayType::Struct => apply!(parse_unsupported_data_element, endianness)
+                    | ArrayType::Struct => apply!(parse_structure_matrix_subelements, endianness, flags)
                     | ArrayType::Object => apply!(parse_unsupported_data_element, endianness)
                     | ArrayType::Char => apply!(parse_unsupported_data_element, endianness)
                     | ArrayType::Sparse => apply!(parse_sparse_matrix_subelements, endianness, flags)
@@ -637,6 +644,72 @@ fn parse_column_index_array_subelement(
     )
 }
 
+//FIXME
+
+pub type FieldNameLength = i32;
+pub type FieldName = String;
+pub type Fields = Vec<DataElement>;
+
+fn parse_structure_matrix_subelements(
+    i: &[u8],
+    endianness: nom::Endianness,
+    flags: ArrayFlags,
+) -> IResult<&[u8], DataElement> {
+    do_parse!(
+        i,
+        dimensions: apply!(parse_dimensions_array_subelement, endianness)
+            >> name: apply!(parse_array_name_subelement, endianness)
+            >> field_name_length: apply!(parse_field_name_length_subelement, endianness)
+            >> fields_nb: value!(dimensions.iter().product::<i32>())
+            >> field_names:
+                count!(
+                    apply!(parse_field_name, field_name_length as usize, endianness),
+                    fields_nb as usize
+                )
+            >> fields:
+                count!(
+                    apply!(parse_matrix_data_element, endianness),
+                    fields_nb as usize
+                )
+            >> (DataElement::StructureMatrix(
+                flags,
+                dimensions,
+                name,
+                field_name_length,
+                field_names,
+                fields
+            ))
+    )
+}
+
+fn parse_field_name_length_subelement(
+    i: &[u8],
+    endianness: nom::Endianness,
+) -> IResult<&[u8], i32> {
+    do_parse!(
+        i,
+        apply!(parse_data_element_tag, endianness) >> length: i32!(endianness) >> (length)
+    )
+}
+
+fn parse_field_name(
+    i: &[u8],
+    length: usize,
+    endianness: nom::Endianness,
+) -> IResult<&[u8], FieldName> {
+    do_parse!(
+        i,
+        name: map_res!(take_till!(|i| i == 0), |b| {
+            std::str::from_utf8(b)
+                .map(|s| s.to_owned())
+                .map_err(|_err| {
+                    nom::Err::Failure(nom::Context::Code(i, nom::ErrorKind::Custom(43)))
+                })
+        }) >> take!(length - name.len())
+            >> (name)
+    )
+}
+
 fn replace_context_slice<'old, 'new, E>(
     context: nom::Context<&'old [u8], E>,
     new_slice: &'new [u8],
@@ -742,6 +815,37 @@ mod test {
             );
         } else {
             panic!("Error extracting DataElement::SparseMatrix");
+        }
+    }
+
+    #[test]
+    fn structure1() {
+        let data = include_bytes!("../tests/jgl009.mat");
+        if let Ok((next1, header)) = parse_header(data) {
+            // dbg!(header);
+            let e = nom::Endianness::Little;
+            if let Ok((next2, tag)) = parse_data_element_tag(next1, e) {
+                // dbg!(tag);
+                let mut buf = Vec::new();
+                Decoder::new(next2).unwrap().read_to_end(&mut buf).unwrap();
+                if let Ok((next3, tag2)) = parse_data_element_tag(&buf, e) {
+                    // dbg!(tag2);
+                    if let Ok((next4, flags)) = parse_array_flags_subelement(next3, e) {
+                        // dbg!(flags);
+                        if let Ok((next5, dimensions)) = parse_dimensions_array_subelement(next4, e)
+                        {
+                            // dbg!(dimensions);
+                            if let Ok((next6, tag3)) = parse_data_element_tag(next4, e) {
+                                dbg!(tag3);
+                                let v = take!(next6, 8);
+                                dbg!(v);
+                                // let name = parse_array_name_subelement(next4, e);
+                                // dbg!(name);
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
