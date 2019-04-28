@@ -111,10 +111,11 @@ fn assert(i: &[u8], v: bool) -> IResult<&[u8], ()> {
     if v {
         Ok((i, ()))
     } else {
-        Err(nom::Err::Failure(error_position!(
-            i,
-            nom::ErrorKind::Custom(48)
-        )))
+        panic!();
+        // Err(nom::Err::Failure(error_position!(
+        //     i,
+        //     nom::ErrorKind::Custom(48)
+        // )))
     }
 }
 
@@ -307,17 +308,27 @@ fn parse_array_name_subelement(i: &[u8], endianness: nom::Endianness) -> IResult
     do_parse!(
         i,
         data_element_tag: apply!(parse_data_element_tag, endianness)
-            >> apply!(
-                assert,
-                data_element_tag.data_type == DataType::Int8 && data_element_tag.data_byte_size > 0
+            // >> apply!(
+            //     assert,
+            //     data_element_tag.data_type == DataType::Int8 && data_element_tag.data_byte_size > 0
+            // )
+            >> name: switch!(value!(data_element_tag.data_type == DataType::Int8 && data_element_tag.data_byte_size > 0),
+                true => map_res!(take!(data_element_tag.data_byte_size), |b| {
+                            std::str::from_utf8(b)
+                            .map(|s| s.to_owned())
+                            .map_err(|_err| {
+                                nom::Err::Failure(nom::Context::Code(i, nom::ErrorKind::Custom(43)))
+                            })
+                        })
+                | false => value!("BAD NAME".to_string())
             )
-            >> name: map_res!(take!(data_element_tag.data_byte_size), |b| {
-                std::str::from_utf8(b)
-                    .map(|s| s.to_owned())
-                    .map_err(|_err| {
-                        nom::Err::Failure(nom::Context::Code(i, nom::ErrorKind::Custom(43)))
-                    })
-            })
+            // >> name: map_res!(take!(data_element_tag.data_byte_size), |b| {
+            //     std::str::from_utf8(b)
+            //         .map(|s| s.to_owned())
+            //         .map_err(|_err| {
+            //             nom::Err::Failure(nom::Context::Code(i, nom::ErrorKind::Custom(43)))
+            //         })
+            // })
             // Padding bytes
             >> take!(data_element_tag.padding_byte_size)
             >> (name)
@@ -661,13 +672,15 @@ fn parse_structure_matrix_subelements(
             >> name: apply!(parse_array_name_subelement, endianness)
             >> field_name_length: apply!(parse_field_name_length_subelement, endianness)
             >> fields_nb: value!(dimensions.iter().product::<i32>())
+            >> field_names_tag: apply!(parse_data_element_tag, endianness)
             >> field_names:
                 count!(
                     apply!(parse_field_name, field_name_length as usize, endianness),
-                    fields_nb as usize
+                    field_names_tag.data_byte_size as usize / field_name_length as usize
                 )
             >> fields:
                 count!(
+                    // FIXME parse_next_data_element here, because of the tag
                     apply!(parse_matrix_data_element, endianness),
                     fields_nb as usize
                 )
@@ -821,6 +834,8 @@ mod test {
     #[test]
     fn structure1() {
         let data = include_bytes!("../tests/jgl009.mat");
+        // let parsed = parse_all(data);
+        // dbg!(parsed);
         if let Ok((next1, header)) = parse_header(data) {
             // dbg!(header);
             let e = nom::Endianness::Little;
@@ -830,22 +845,62 @@ mod test {
                 Decoder::new(next2).unwrap().read_to_end(&mut buf).unwrap();
                 if let Ok((next3, tag2)) = parse_data_element_tag(&buf, e) {
                     // dbg!(tag2);
-                    if let Ok((next4, flags)) = parse_array_flags_subelement(next3, e) {
-                        // dbg!(flags);
+                    if let Ok((next4, flags1)) = parse_array_flags_subelement(next3, e) {
+                        // dbg!(flags1);
                         if let Ok((next5, dimensions)) = parse_dimensions_array_subelement(next4, e)
                         {
                             // dbg!(dimensions);
-                            if let Ok((next6, tag3)) = parse_data_element_tag(next4, e) {
-                                dbg!(tag3);
-                                let v = take!(next6, 8);
-                                dbg!(v);
-                                // let name = parse_array_name_subelement(next4, e);
-                                // dbg!(name);
+                            // if let Ok((next6, tag3)) = parse_data_element_tag(next4, e) {
+                            //     dbg!(tag3);
+                            if let Ok((next7, name)) = parse_array_name_subelement(next5, e) {
+                                dbg!(name);
+                                if let Ok((next8, field_name_length)) =
+                                    parse_field_name_length_subelement(next7, e)
+                                {
+                                    // dbg!(field_name_length);
+                                    if let Ok((next9, tag4)) = parse_data_element_tag(next8, e) {
+                                        // dbg!(tag4);
+                                        if let Ok((next10, field_names)) = count!(
+                                            next9,
+                                            apply!(parse_field_name, field_name_length as usize, e),
+                                            tag4.data_byte_size as usize
+                                                / field_name_length as usize
+                                        ) {
+                                            // dbg!(field_names);
+                                            if let Ok((next11, tag5)) =
+                                                parse_data_element_tag(next10, e)
+                                            {
+                                                // dbg!(tag5);
+
+                                                // dbg!(mat);
+                                                let flags2 =
+                                                    parse_array_flags_subelement(next11, e);
+                                                dbg!(flags2);
+                                                // need char array support
+                                            }
+                                        }
+                                    }
+                                }
                             }
+                            // }
                         }
                     }
                 }
             }
         }
+    }
+
+    #[test]
+    fn structure2() {
+        let data = include_bytes!("../tests/jgl009.mat");
+        let pars = parse_all(data);
+        dbg!(pars);
+    }
+
+    #[test]
+    fn inc() {
+        let data = include_bytes!("../tests/farm.mat");
+        let pars = parse_all(data);
+        dbg!(pars);
     }
 }
